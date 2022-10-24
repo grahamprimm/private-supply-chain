@@ -8,11 +8,11 @@ It is mostly the same across every enclave with slight differences shown the 3 d
 
 ## Components
 
-- RHEL8 Hardened and STIGED (you know...RMF)
+- RHEL8 Hardened and STIGed
 - Terraform (Declare)
 - Ansible (Impair)
 - Podman (Container Registry)
-- Apache (Reverse Proxy)
+- Nginx (Reverse Proxy)
 - SmallStep (TLS)
 
 ## Steps
