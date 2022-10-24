@@ -1,0 +1,65 @@
+---
+- name: Define list of repositories
+  ansible.builtin.set_fact:
+    mirrors:
+      - "ansible-2.9-for-rhel-8-x86_64-rpms"
+      - "codeready-builder-for-rhel-8-x86_64-rpms"
+      - "epel"
+      - "epel-modular"
+      - "hashicorp"
+      - "kubernetes"
+      - "rancher-rke2-1-24-latest"
+      - "rancher-rke2-common-latest"
+      - "rhceph-5-tools-for-rhel-8-x86_64-rpms"
+      - "rhel-8-for-x86_64-appstream-rpms"
+      - "rhel-8-for-x86_64-baseos-rpms"
+
+- name: Download mirror for all repositories
+  ansible.builtin.command: "reposync --repoid={{ item }} --download-path=/data/mirrors/rhel --downloadcomps --download-metadata --newest"
+  with_items: "{{ mirrors }}"
+  async: 86400
+  poll: 0
+  register: reposync
+
+- name: Check reposync status
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ reposync.results }}"
+  loop_control:
+    loop_var: "item"
+  register: reposync_result
+  until: reposync_result.finished
+  retries: 1000
+  delay: 20
+
+- name: Prepare cronjob for autosync
+  ansible.builtin.cron:
+    hour: "0"
+    minute: "0"
+    name: "Cronjob to autosync RHEL repo"
+    state: present
+    job: if [ $(ping -c 1 -q google.com >& /dev/null; echo $?) == "0" ];then reposync -n -p /data/mirrors/rhel --downloadcomps --download-metadata --newest > /dev/null 2>&1;fi
+  async: 10
+  poll: 0
+  register: cronjob
+
+- name: Checking the cronjob create Job Status
+  ansible.builtin.async_status:
+    jid: "{{ cronjob.ansible_job_id }}"
+  register: cronjob_result
+  until: cronjob_result.finished
+
+- name: Set file access permissions
+  ansible.builtin.command: "setfacl -R -m u:nginx:rwx /data/mirrors"
+
+- name: Set context for selinux
+  ansible.builtin.command: "chcon -Rt httpd_sys_content_t /data/mirrors"
+
+- name: Set repo to local
+  ansible.builtin.template:
+    src: local.repo.j2
+    dest: /etc/yum.repos.d/local.repo
+    owner: root
+    group: root
+    mode: 0644
+  when: not internet

@@ -1,0 +1,14 @@
+source:
+  containerRegistry: https://registry.big-bang.{{ domain }}
+  repo:
+    kind: HELM
+    url: {{ item.url }}
+  relocateContainerImages: false
+  containers:
+    auth:
+      username: podman
+      password: {{ podman_login }}  
+target:
+  intermediateBundlesPath: /data/helm/bundles/
+charts:
+  - 

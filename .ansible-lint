@@ -1,0 +1,12 @@
+---
+skip_list:
+  - 'no-changed-when'
+  - 'command-instead-of-module'
+  - 'command-instead-of-shell'
+  - 'ignore-errors'
+  - 'package-latest'
+  - 'command-instead-of-module'
+  - 'risky-shell-pipe'
+  - 'template-instead-of-copy'
+  - latest[git]
+  - yaml[line-length]

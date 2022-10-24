@@ -1,0 +1,13 @@
+---
+- name: Bootstrap the big bang
+  hosts: all
+  become: true
+  roles:
+    - init
+    - common
+    - certificates
+    - nginx
+    - registry
+    - repo
+    - dns_setup
+    - setup

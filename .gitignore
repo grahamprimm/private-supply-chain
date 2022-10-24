@@ -1,0 +1,7 @@
+tf/.terraform*
+tf/terraform*
+.terraform
+*.tfstate
+.vscode
+vpass.txt
+ansible.log

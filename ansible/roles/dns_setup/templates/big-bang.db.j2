@@ -1,0 +1,16 @@
+$ORIGIN big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}.
+$TTL 3600       ; 1 hour
+
+@       IN      SOA     big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}. root.{{ BIG_BANG_DOMAIN_SUFFIX}}. (
+                        {{ dns_timestamp.stdout }} ; serial
+                        3600       ; refresh (1 hour)
+                        600        ; retry (10 minutes)
+                        86400      ; expire (1 day)
+                        600        ; minimum (10 minutes)
+                        )
+
+                IN        NS      big-bang.big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}.
+big-bang        IN        A       {{ BIG_BANG_IP }}
+registry        IN        CNAME   big-bang.big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}.
+repo            IN        CNAME   big-bang.big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}.
+helm            IN        CNAME   big-bang.big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}.

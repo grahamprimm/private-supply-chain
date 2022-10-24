@@ -1,0 +1,75 @@
+---
+- name: Grab timestamp for zone file
+  ansible.builtin.shell:
+    cmd: "date +%Y%m%d%d"
+  register: dns_timestamp
+
+- name: Install bind-utils for tsig-keygen command
+  ansible.builtin.dnf:
+    name: "bind-utils"
+    state: latest
+
+- name: Create directories for DNS files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: 0755
+    owner: 101 # bind runs as UID=101
+    group: 101 # bind runs as UID=101
+  loop:
+    - /data/dns
+    - /data/dns/zones
+  async: 100
+  poll: 0
+
+- name: Copy named configuration file
+  ansible.builtin.template:
+    src: named.conf.local.j2
+    dest: /data/dns/named.conf.local
+    owner: 101 # bind runs as UID=101
+    group: 101 # bind runs as GID=101
+    mode: 0755
+
+- name: Copy big-bang zone file
+  ansible.builtin.template:
+    src: big-bang.db.j2
+    dest: /data/dns/zones/big-bang.db
+    owner: 101 # bind runs as UID=101
+    group: 101 # bind runs as GID=101
+    mode: 0755
+
+- name: Create DDNS update key for mother
+  ansible.builtin.shell:
+    cmd: "tsig-keygen -a hmac-sha512 mother > /data/dns/mother.key"
+    creates: "/data/dns/mother.key"
+
+- name: Set DDNS key permissions
+  ansible.builtin.file:
+    path: "/data/dns/mother.key"
+    owner: 101
+    group: 101
+    mode: 0600
+
+- name: Create and start registry container
+  containers.podman.podman_container:
+    name: dns
+    image: bind9:latest
+    state: started
+    recreate: true
+    detach: true
+    privileged: false
+    expose:
+      - 53
+    ports:
+      - 53:53/udp
+    env:
+      TZ: "EST"
+    volumes:
+      - "/data/dns/named.conf.local:/etc/bind/named.conf.local:Z"
+      - "/data/dns/zones/:/etc/bind/zones/:rw,Z"
+      - "/data/dns/mother.key:/etc/bind/mother.key:Z"
+    generate_systemd:
+      path: "/etc/systemd/system"
+      restart_policy: always
+      new: true
+      no_header: true

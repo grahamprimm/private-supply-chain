@@ -1,0 +1,14 @@
+[Unit]
+Description=Helm Chartmuseum
+Documentation=https://chartmuseum.com/
+
+[Service]
+ExecStart=/usr/bin/chartmuseum \\
+ --port=8443 \\
+ --storage="local" \\
+ --storage-local-rootdir="/data/helm/"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

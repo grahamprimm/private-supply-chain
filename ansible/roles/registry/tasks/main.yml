@@ -1,0 +1,241 @@
+---
+- name: Create htpasswd
+  ansible.builtin.command: >-
+    podman run --rm --privileged
+    --entrypoint htpasswd
+    httpd:2 -Bbn podman {{ podman_login }}
+  register: htpasswd
+
+- name: Add htpasswd file
+  ansible.builtin.lineinfile:
+    path: "/etc/nginx/conf.d/htpasswd"
+    line: "{{ htpasswd.stdout }}"
+    state: present
+    create: true
+    mode: 0644
+
+- name: Set volume base size for registry
+  ansible.builtin.lineinfile:
+    path: "/etc/containers/storage.conf"
+    regexp: '^#\ basesize\ =\ \"10G\"'
+    line: 'basesize = "100G"'
+    state: present
+
+- name: Create and start registry container
+  containers.podman.podman_container:
+    name: registry
+    image: registry:2
+    state: started
+    recreate: true
+    detach: true
+    privileged: true
+    expose:
+      - 5000
+    ports:
+      - 5000:5000
+    read_only: false
+    generate_systemd:
+      path: "/etc/systemd/system"
+      restart_policy: always
+      new: true
+      no_header: true
+  register: reg_container
+
+- name: Print reg status
+  ansible.builtin.debug:
+    msg: "{{ reg_container }}"
+
+- name: Set selinux option
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect
+    state: true
+    persistent: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    name: container-registry
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Podman login
+  containers.podman.podman_login:
+    registry: registry.big-bang{{ domain }}
+    username: "podman"
+    password: "{{ podman_login }}"
+
+- name: Upload image list
+  ansible.builtin.copy:
+    src: "images.txt"
+    dest: "/data"
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+
+- name: Get latest rke2 images from releases
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/rancher/rke2/releases/latest"
+    method: GET
+  register: rancher_releases
+
+- name: Set correct images architecture
+  ansible.builtin.set_fact:
+    rancher_images: "{{ rancher_releases.json.assets | selectattr('name', 'match', 'rke2-images-all.linux-amd64.txt') | list | first }}"
+
+- name: Download rke2 images list
+  ansible.builtin.get_url:
+    url: "{{ rancher_images.browser_download_url }}"
+    dest: "/data/rke2-images-all.linux-amd64.txt"
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+
+- name: Append rancher images to images.txt file
+  ansible.builtin.shell: "cat /data/rke2-images-all.linux-amd64.txt >> /data/images.txt"
+
+- name: Create full image list
+  ansible.builtin.shell: "cat /data/images.txt | sort -u | uniq -u > /data/images_all.txt"
+
+- name: Get full image paths
+  ansible.builtin.shell: "cat /data/images_all.txt"
+  register: images
+
+- name: Set image attribues
+  ansible.builtin.set_fact:
+    image_list: "{{ images.stdout_lines | list }}"
+
+- name: Pull images
+  containers.podman.podman_image:
+    name: "{{ item }}"
+    pull: true
+    state: present
+    force: true
+  loop: "{{ image_list }}"
+  register: images_pulled
+
+# TODO: Join path to name by rejecting first element after split on '/'
+- name: Tag images with versions
+  containers.podman.podman_tag:
+    image: "{{ item }}"
+    target_names:
+      - "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:{{ item | split('/') | last | split(':') | last }}"
+  loop: "{{ image_list }}"
+
+- name: Tag images with latest
+  containers.podman.podman_tag:
+    image: "{{ item }}"
+    target_names:
+      - "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:latest"
+  loop: "{{ image_list }}"
+  register: latest_tags
+
+- name: Push versioned images to registry.big-bang{{ domain }}
+  containers.podman.podman_image:
+    name: "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:{{ item | split('/') | last | split(':') | last }}"
+    push: true
+    push_args:
+      dest: registry.big-bang{{ domain }}
+    username: podman
+    password: "{{ podman_login }}"
+  loop: "{{ image_list }}"
+  register: versioned_push
+  async: 86400
+  poll: 0
+
+- name: Push latest images to registry.big-bang{{ domain }}
+  containers.podman.podman_image:
+    name: "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:latest"
+    push: true
+    push_args:
+      dest: registry.big-bang{{ domain }}
+    username: podman
+    password: "{{ podman_login }}"
+  loop: "{{ image_list }}"
+  register: latest_push
+  async: 86400
+  poll: 0
+
+- name: Check versioned images pushed
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ versioned_push.results }}"
+  loop_control:
+    loop_var: "item"
+  register: versioned_push_results
+  until: versioned_push_results.finished
+  retries: 1000
+  delay: 5
+
+- name: Check latest images pushed
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ latest_push.results }}"
+  loop_control:
+    loop_var: "item"
+  register: latest_push_results
+  until: latest_push_results.finished
+  retries: 1000
+  delay: 5
+
+- name: Remove public images from local storage
+  containers.podman.podman_image:
+    name: "{{ item }}"
+    state: absent
+  with_items: "{{ image_list }}"
+  register: local_images_removed
+  async: 1200
+  poll: 0
+
+# TODO: Save to transfer drive instead
+- name: Save versioned images to archive
+  containers.podman.podman_save:
+    image: "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:{{ item | split('/') | last | split(':') | last }}"
+    format: oci-archive
+    dest: "/data/images/{{ item | split('/') | last | split(':') | first }}_{{ item | split('/') | last | split(':') | last }}.tar"
+  loop: "{{ image_list }}"
+  register: versioned_images_saved
+  async: 86400
+  poll: 0
+
+- name: Save latest images to archive
+  containers.podman.podman_save:
+    image: "registry.big-bang{{ domain }}/{{ item | split('/') | last | split(':') | first }}:latest"
+    format: oci-archive
+    dest: "/data/images/{{ item | split('/') | last | split(':') | first }}_latest.tar"  # TODO: Save to transfer drive instead
+  loop: "{{ image_list }}"
+  register: latest_images_saved
+  async: 86400
+  poll: 0
+
+- name: Check latest images saved
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ latest_images_saved.results }}"
+  loop_control:
+    loop_var: "item"
+  register: latest_images_saved_results
+  until: latest_images_saved_results.finished
+  retries: 1000
+  delay: 20
+
+- name: Check versioned images saved
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ versioned_images_saved.results }}"
+  loop_control:
+    loop_var: "item"
+  register: versioned_images_saved_results
+  until: versioned_images_saved_results.finished
+  retries: 1000
+  delay: 20
+
+- name: Check local images removed
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ local_images_removed.results }}"
+  loop_control:
+    loop_var: "item"
+  register: local_images_removed_results
+  until: local_images_removed_results.finished
+  retries: 1000
+  delay: 5

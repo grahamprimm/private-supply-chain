@@ -1,0 +1,12 @@
+source:
+  intermediateBundlesPath: /data/helm/bundles/
+target:
+  containerRegistry: registry.big-bang.{{ domain }}
+  relocateContainerImages: false
+  containers:
+    auth:
+      username: podman
+      password: {{ podman_login }}
+  repo:
+    kind: CHARTMUSEUM # or as any other supported Helm Chart repository kinds
+    url: https://helm.big-bang.{{ domain }}

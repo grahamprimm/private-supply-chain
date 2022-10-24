@@ -1,0 +1,140 @@
+---
+- name: Install helm
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /home/{{ ansible_user }}/get_helm.sh
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+    seuser: system_u
+    serole: object_r
+    setype: bin_t
+
+- name: Install helm
+  ansible.builtin.command: /home/{{ ansible_user }}/get_helm.sh
+  become: true
+  environment:
+    HELM_INSTALL_DIR: "/usr/bin"
+
+- name: Get link to latest release of chartmuseum
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/helm/chartmuseum/releases/latest
+    return_content: true
+  register: latest_release_cm
+
+- name: Get link to latest release of chart-syncer
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/bitnami-labs/charts-syncer/releases/latest
+    return_content: true
+  register: latest_release_cs
+
+- name: Set correct images architecture for chartmuseum
+  ansible.builtin.set_fact:
+    cm_download: "{{ latest_release_cm.json.assets | selectattr('name', 'search', 'linux-amd64.tar.gz') | list | first }}"
+
+- name: Get script to install latest chartmuseum release
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/helm/chartmuseum/main/scripts/get-chartmuseum"
+    dest: /home/{{ ansible_user }}/get-chartmuseum.sh
+    owner: root
+    group: root
+    mode: 0755
+    seuser: system_u
+    serole: object_r
+    setype: bin_t
+    selevel: s0
+
+- name: Install chartmuseum
+  ansible.builtin.command: /home/{{ ansible_user }}/get-chartmuseum.sh
+  become: true
+  environment:
+    CHARTMUSEUM_INSTALL_DIR: "/usr/bin"
+
+- name: Set correct images architecture for chart-syncer
+  ansible.builtin.set_fact:
+    cs_download: "{{ latest_release_cs.json.assets | selectattr('name', 'search', 'linux_x86_64.tar.gz') | list | first }}"
+
+- name: Download lastest chart-syncer release
+  ansible.builtin.get_url:
+    url: "{{ cs_download.browser_download_url }}"
+    dest: /tmp/charts-syncer.tar.gz
+    owner: root
+    group: root
+    mode: 0755
+    seuser: system_u
+    serole: object_r
+    setype: bin_t
+    selevel: s0
+
+- name: Extract charts-syncer
+  ansible.builtin.unarchive:
+    src: /tmp/charts-syncer.tar.gz
+    dest: /usr/bin
+    remote_src: true
+    owner: root
+    group: root
+    mode: 0755
+    seuser: system_u
+    serole: object_r
+    setype: bin_t
+    selevel: s0
+
+- name: Define list of repos to sync
+  ansible.builtin.set_fact:
+    repos:
+      - name: bitnami
+        url: "https://charts.bitnami.com/bitnami"
+      - name: trilium
+        url: "https://ohdearaugustin.github.io/charts/"
+      - name: jetstack
+        url: "https://charts.jetstack.io"
+      - name: rook
+        url: "https://charts.rook.io/release"
+      - name: eck
+        url: "https://helm.elastic.co"
+      - name: gitlab
+        url: "https://charts.gitlab.io"
+      - name: metallb
+        url: "https://metallb.github.io/metallb"
+
+- name: Move chartmuseum service to system directory
+  ansible.builtin.copy:
+    src: chartmuseum.service
+    dest: /etc/systemd/system/
+    owner: root
+    group: root
+    mode: 0644
+    seuser: system_u
+    serole: object_r
+    setype: systemd_unit_file_t
+    selevel: s0
+
+- name: Enable and start chartmuseum service
+  ansible.builtin.systemd:
+    name: chartmuseum
+    state: started
+    enabled: true
+
+- name: Create chart-syncer bundle config file
+  ansible.builtin.template:
+    src: config-save-bundles.yaml.j2
+    dest: "/home/{{ ansible_user }}/config-save-{{ item.name }}.yaml"
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+    mode: 0644
+  loop: "{{ repos }}"
+
+- name: Create chart-syncer config file
+  ansible.builtin.template:
+    src: repo-sync.yaml.j2
+    dest: "/home/{{ ansible_user }}/repo-sync.yaml"
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+    mode: 0644
+
+- name: Run chart-syncer with each config
+  ansible.builtin.command: "charts-syncer sync --latest-version-only --config /home/{{ ansible_user }}/config-save-{{ item.name }}.yaml"
+  loop: "{{ repos }}"
+
+- name: Sync to chartmuseum server
+  ansible.builtin.command: "charts-syncer sync --config /home/{{ ansible_user }}/repo-sync.yaml"

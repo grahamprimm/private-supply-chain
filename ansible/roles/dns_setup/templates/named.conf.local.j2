@@ -1,0 +1,7 @@
+zone "big-bang.{{ BIG_BANG_DOMAIN_SUFFIX }}" {
+        type master;
+        file "/etc/bind/zones/big-bang.db";
+        update-policy { grant mother zonesub ANY; };
+};
+
+include "/etc/bind/mother.key";

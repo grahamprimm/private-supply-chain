@@ -1,0 +1,83 @@
+stages:
+  - validate
+  - plan
+  - deploy
+  - destroy
+
+Terraform validate:
+  stage: validate
+  image: hashicorp/terraform:latest
+  before_script:
+    - cd tf
+  script:
+    - terraform init
+    - terraform validate
+
+Ansible lint:
+  stage: validate
+  image: cytopia/ansible-lint:latest
+  script:
+    - ansible --version
+    - ansible-lint --version
+    - ansible-lint -c ansible/.ansible-lint ansible/*.yml
+
+Terraform plan:
+  stage: plan
+  image: hashicorp/terraform:latest
+  before_script:
+    - cd tf
+  script:
+    - terraform init
+    - terraform workspace new com
+    - terraform plan -var="vsphere_password=${VCENTER_PASSWORD}" -var="vsphere_user=${VSPHERE_USER}" 
+  artifacts:
+    name: init
+    paths: 
+      - ".terraform/"
+
+Terraform apply:
+  stage: deploy
+  image: hashicorp/terraform:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - cd tf
+  script:
+    - terraform init
+    - terraform apply -input=false -auto-approve -var="vsphere_password=${VCENTER_PASSWORD}" -var="vsphere_user=${VSPHERE_USER}" 
+    # - terraform output
+  artifacts:
+    name: init
+    paths: 
+      - ".terraform/"
+  dependencies:
+    - Terraform plan
+  when: manual
+
+Ansible deploy:
+  stage: deploy
+  variables:
+    ANSIBLE_HOST_KEY_CHECKING: 'false'
+  image: cytopia/ansible-lint:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - apk update && apk add openssh-client curl
+    - apk add --no-cache python3 py3-pip openssh-client sshpass pass expect
+    - ansible --version
+    - chmod og= $id_rsa
+    - ansible-playbook -i ansible/hosts.yaml ansible/repo.yml --extra-vars "deployer_password='${DEPLOYER_PASSWORD}'
+       ansible_become_pass='${ANSIBLE_PASSWORD}' ansible_ssh_private_key_file='$id_rsa' ansible_password='${ANSIBLE_PASSWORD}'"
+  needs: ['Terraform apply']
+
+Terraform destroy:
+  stage: destroy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - cd tf
+  script:
+    - terraform destroy -input=false -auto-approve -var="VCENTER_PASSWORD=${VCENTER_PASSWORD}" -var="vsphere_user=${VSPHERE_USER}" 
+  dependencies:
+    - Terraform apply
+  when: manual

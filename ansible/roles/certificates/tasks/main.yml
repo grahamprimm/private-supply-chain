@@ -1,0 +1,300 @@
+---
+- name: Create lowercase 15 character password for apache cert/key pair
+  ansible.builtin.set_fact:
+    cert_passsword: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+
+- name: Create lowercase 15 character password for CA
+  ansible.builtin.set_fact:
+    ca_passsword: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+
+- name: Create lowercase 15 character password for podman login
+  ansible.builtin.set_fact:
+    podman_login: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+
+- name: Check if smallstep is installed
+  ansible.builtin.stat:
+    path: /usr/bin/step
+  register: step_installed
+
+- name: Download smallstep
+  ansible.builtin.unarchive:
+    src: "{{ item }}"
+    dest: /tmp/
+    remote_src: true
+  loop:
+    - "https://dl.step.sm/gh-release/cli/docs-ca-install/v0.20.0/step_linux_0.20.0_amd64.tar.gz"
+    - "https://dl.step.sm/gh-release/certificates/docs-ca-install/v0.20.0/step-ca_linux_0.20.0_amd64.tar.gz"
+  when: not step_installed.stat.exists
+
+- name: Move bins
+  ansible.builtin.copy:
+    src: "/tmp/{{ item }}"
+    dest: /usr/bin/
+    mode: 0755
+    remote_src: true
+  loop:
+    - step_0.20.0/bin/step
+    - step-ca_0.20.0/bin/step-ca
+  when: not step_installed.stat.exists
+
+- name: Remove smallstep
+  ansible.builtin.file:
+    path: "/tmp/{{ item }}"
+    state: absent
+  loop:
+    - step
+    - step-ca
+  when: not step_installed.stat.exists
+
+- name: Create dirs
+  ansible.builtin.file:
+    path: "/etc/certs/"
+    state: directory
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+
+- name: Create password files
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: 0644
+  with_items:
+    - { src: 'cakey.pass.j2', dest: '/etc/certs/cakey.pass' }
+    - { src: 'key.pass.j2', dest: '/etc/certs/key.pass'}
+    - { src: 'podman.pass.j2', dest: '/etc/certs/podman.pass'}
+
+
+- name: Init the CA provioner
+  ansible.builtin.command:
+    argv:
+      - step 
+      - ca 
+      - init 
+      - --deployment-type=standalone 
+      - --name=pki 
+      - "--dns=pki.big-bang{{ domain }}"
+      - "--address=pki.big-bang.{{ domain }}:9000"
+      - --provisioner=pki 
+      - --password-file=/etc/certs/cakey.pass
+
+- name: 
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - useradd --system --home /etc/step-ca --shell /bin/false step
+    - mv $(step path) /etc/step-ca
+    - cp /etc/certs/cakey.pass /etc/step-ca/password.txt
+    - chown -R step:step /etc/step-ca
+
+- name: Update ca.json  
+  ansible.builtin.replace:
+    path: {{ item }}
+    regexp: \/root\/.step
+    replace: /etc/step-ca
+  loop:
+    - /etc/step-ca/config/defaults.json
+    - /etc/step-ca/config/ca.json
+
+- name: Create step-ca.service
+  ansible.builtin.copy:
+    src: "step-ca.service"
+    dest: "/etc/systemd/system/step-ca.service"
+    mode: 0640
+    owner: root
+    group: root
+
+- name: Just force systemd to reread configs (2.4 and above)
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Enable and start step-ca
+  ansible.builtin.systemd:
+    name: step-ca
+    state: started
+    enabled: yes
+
+- name: Create podman certificate
+  ansible.builtin.command:
+    argv:
+      - step
+      - certificate
+      - create
+      - podman{{ domain }}
+      - "/etc/certs/podman{{ domain }}.crt"
+      - "/etc/certs/podman{{ domain }}.key"
+      - --profile
+      - leaf
+      - -not-after=8760h
+      - --ca
+      - "/etc/step-ca/certs/intermediate_ca.crt"
+      - --ca-key
+      - "/etc/step-ca/secrets/intermediate_ca_key"
+      - --bundle
+      - --san
+      - registry{{ domain }}
+      - --no-password
+      - --insecure
+      - --ca-password-file
+      - "/etc/certs/cakey.pass"
+
+- name: Create registry ssl certificate
+  ansible.builtin.command:
+    argv:
+      - step
+      - certificate
+      - create
+      - registry.big-bang{{ domain }}
+      - "/etc/certs/registry.big-bang{{ domain }}.crt"
+      - "/etc/certs/registry.big-bang{{ domain }}.key"
+      - --profile
+      - leaf
+      - -not-after=8760h
+      - --ca
+      - "/etc/step-ca/certs/intermediate_ca.crt"
+      - --ca-key
+      - "/etc/step-ca/secrets/intermediate_ca_key"
+      - --bundle
+      - --san
+      - registry.big-bang{{ domain }}
+      - --san
+      - registry
+      - --no-password
+      - --insecure
+      - --ca-password-file
+      - "/etc/certs/cakey.pass"
+
+- name: Create repo ssl certificate
+  ansible.builtin.command:
+    argv:
+      - step
+      - certificate
+      - create
+      - repo.big-bang{{ domain }}
+      - "/etc/certs/repo.big-bang{{ domain }}.crt"
+      - "/etc/certs/repo.big-bang{{ domain }}.key"
+      - --profile
+      - leaf
+      - -not-after=8760h
+      - --ca
+      - "/etc/step-ca/certs/intermediate_ca.crt"
+      - --ca-key
+      - "/etc/step-ca/secrets/intermediate_ca_key"
+      - --bundle
+      - --san
+      - repo.big-bang{{ domain }}
+      - --san
+      - repo
+      - --no-password
+      - --insecure
+      - --ca-password-file
+      - "/etc/certs/key.pass"
+
+- name: Create helm ssl certificate
+  ansible.builtin.command:
+    argv:
+      - step
+      - certificate
+      - create
+      - helm.big-bang{{ domain }}
+      - "/etc/certs/helm.big-bang{{ domain }}.crt"
+      - "/etc/certs/helm.big-bang{{ domain }}.key"
+      - --profile
+      - leaf
+      - -not-after=8760h
+      - --ca
+      - "/etc/step-ca/certs/intermediate_ca.crt"
+      - --ca-key
+      - "/etc/step-ca/secrets/intermediate_ca_key"
+      - --bundle
+      - --san
+      - helm.big-bang{{ domain }}
+      - --san
+      - helm
+      - --no-password
+      - --insecure
+      - --ca-password-file
+      - "/etc/certs/key.pass"
+
+- name: Make CA chain
+  block:
+    - name: Set CA files
+      ansible.builtin.set_fact:
+        ca_files:
+          - "/etc/step-ca/certs/intermediate_ca.crt"
+          - "/etc/step-ca/certs/root_ca.crt"
+
+    - name: Read files
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop: "{{ ca_files }}"
+      register: ca_slurp
+
+    - name: Print cachain
+      ansible.builtin.debug:
+        msg: "{{ ca_slurp.results }}"
+
+    - name: Create ca-chain file
+      ansible.builtin.template:
+        src: ca-chain.crt.j2
+        dest: /etc/certs/ca-chain.crt
+        mode: 0644
+        owner: root
+        group: root
+
+- name: Move certificates for system
+  ansible.builtin.copy:
+    src: "/etc/certs/root_ca.crt"
+    dest: "/etc/pki/ca-trust/source/anchors/"
+    mode: 0644
+    remote_src: true
+
+- name: Update ca trust
+  ansible.builtin.command: "update-ca-trust extract"
+
+- name: Move certificates for podman
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: /etc/ssl/
+    mode: 0644
+    remote_src: true
+  loop:
+    - "/etc/certs/registry.big-bang{{ domain }}.crt"
+    - "/etc/certs/registry.big-bang{{ domain }}.key"
+    - "/etc/certs/repo.big-bang{{ domain }}.crt"
+    - "/etc/certs/repo.big-bang{{ domain }}.key"
+    - "/etc/certs/helm.big-bang{{ domain }}.crt"
+    - "/etc/certs/helm.big-bang{{ domain }}.key"
+
+- name: Move registry certificates
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: /data/certs
+    mode: 0644
+    remote_src: true
+  loop:
+    - "/etc/certs/registry.big-bang{{ domain }}.key"
+    - "/etc/certs/registry.big-bang{{ domain }}.crt"
+
+- name: Copy files to nginx folder
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: /etc/nginx/conf.d/
+    mode: 0644
+    remote_src: true
+  loop:
+    - "/etc/certs/registry.big-bang{{ domain }}.key"
+    - "/etc/certs/registry.big-bang{{ domain }}.crt"
+    - "/etc/certs/repo.big-bang{{ domain }}.crt"
+    - "/etc/certs/repo.big-bang{{ domain }}.key"
+    - "/etc/certs/helm.big-bang{{ domain }}.crt"
+    - "/etc/certs/helm.big-bang{{ domain }}.key"
+
+- name: Trust root ca
+  ansible.builtin.copy:
+    src: "/etc/certs/root_ca.crt"
+    dest: "{{ item }}"
+    mode: 0644
+    remote_src: true
+  loop:
+    - "/etc/containers/certs.d/registry.big-bang{{ domain }}/"
+    - "/etc/containers/certs.d/repo.big-bang{{ domain }}/"

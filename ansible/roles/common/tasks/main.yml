@@ -1,0 +1,451 @@
+---
+- name: Set dns server
+  ansible.builtin.template:
+    src: resolv.conf.j2
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Set hosts file
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    insertafter: EOF
+    line: '{{ BIG_BANG_IP }} big-bang.{{ domain }} registry.big-bang.{{ domain }} repo.big-bang.{{ domain }} big-bang registry repo'
+    state: present
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Check if six.pyc exists in /usr/bin
+  ansible.builtin.stat:
+    path: /usr/bin/six.pyc
+  register: six
+
+- name: Remove six.pyc file
+  ansible.builtin.file:
+    path: /usr/bin/six.pyc
+    state: absent
+  when: six.stat.exists
+
+- name: Subscription stuff
+  when: internet
+  block:
+    - name: Fail if no credentials are provided
+      ansible.builtin.fail:
+        msg: "Please define rhn_subscription_username, rhn_subscription_password to enroll your system"
+      when: rhsm_username is undefined or rhsm_password is undefined
+
+    - name: Remove subscriptions
+      community.general.redhat_subscription:
+        state: absent
+
+    - name: Clear subscription cache
+      ansible.builtin.command: "subscription-manager clean"
+
+    - name: Register subscription
+      community.general.redhat_subscription:
+        state: present
+        username: "{{ rhsm_username }}"
+        password: "{{ rhsm_password }}"
+        auto_attach: true
+        server_insecure: true
+
+- name: Clean dnf
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - dnf autoremove -y
+    - dnf clean all
+  register: clean_dnf
+
+- name: Stop fapolicyd
+  ansible.builtin.service:
+    name: fapolicyd
+    state: stopped
+    enabled: false
+  async: 10
+  poll: 0
+
+# TODO: add drive mount and update here when not internet
+
+- name: Copy gpg keys from disk
+  ansible.builtin.copy:
+    src: "/data/keys/{{ item }}" # TODO: pull from attached drive instead of /data/keys
+    dest: /etc/pki/rpm-gpg/
+    owner: root
+    group: root
+    mode: 0644
+  loop:
+    - hashicorp.gpg
+    - kubernetes-rpm-package-key.gpg
+    - rancher-public.key
+    - RPM-GPG-KEY-redhat-beta
+    - kubernetes-yum-key.gpg
+    - RPM-GPG-KEY-EPEL-8
+    - RPM-GPG-KEY-redhat-release
+  when: not internet
+
+- name: Check for line in /etc/rpm/macros.verify
+  ansible.builtin.lineinfile:
+    path: /etc/rpm/macros.verify
+    line: '%_pkgverify_level signature'
+    state: present
+    insertafter: EOF
+    create: true
+    mode: 0644
+  async: 10
+  poll: 0
+
+- name: Download gpg keys and enable public repos
+  when: internet
+  block:
+    - name: Enable rhel repos
+      community.general.rhsm_repository:
+        name: "{{ item }}"
+        state: enabled
+      with_items:
+        - codeready-builder-for-rhel-8-x86_64-rpms
+        - rhceph-5-tools-for-rhel-8-x86_64-rpms
+        - rhel-8-for-x86_64-baseos-rpms
+        - rhel-8-for-x86_64-appstream-rpms
+        - ansible-2.9-for-rhel-8-x86_64-rpms
+      register: enabled_repos
+      async: 600
+      poll: 0
+
+    - name: Add kubernetes rpm gpg key
+      ansible.builtin.get_url:
+        url: "https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg"
+        dest: "/etc/pki/rpm-gpg/kubernetes-rpm-package-key.gpg"
+        validate_certs: true
+        timeout: 10
+        mode: 0644
+        owner: root
+        group: root
+        seuser: system_u
+        serole: object_r
+        setype: cert_t
+        selevel: s0
+      async: 100
+      poll: 0
+
+    - name: Add kubernetes yum gpg key
+      ansible.builtin.get_url:
+        url: "https://packages.cloud.google.com/yum/doc/yum-key.gpg"
+        dest: "/etc/pki/rpm-gpg/kubernetes-yum-key.gpg"
+        validate_certs: true
+        timeout: 10
+        mode: 0644
+        owner: root
+        group: root
+        seuser: system_u
+        serole: object_r
+        setype: cert_t
+        selevel: s0
+      async: 100
+      poll: 0
+
+    - name: Add rke gpg key
+      ansible.builtin.get_url:
+        url: "https://rpm.rancher.io/public.key"
+        dest: "/etc/pki/rpm-gpg/rancher-public.key"
+        validate_certs: true
+        timeout: 10
+        mode: 0644
+        owner: root
+        group: root
+        seuser: system_u
+        serole: object_r
+        setype: cert_t
+        selevel: s0
+      async: 100
+      poll: 0
+
+    - name: Add hashicorp gpg key
+      ansible.builtin.get_url:
+        url: "https://rpm.releases.hashicorp.com/gpg"
+        dest: "/etc/pki/rpm-gpg/hashicorp.gpg"
+        validate_certs: true
+        mode: 0644
+        owner: root
+        group: root
+        seuser: system_u
+        serole: object_r
+        setype: cert_t
+        selevel: s0
+      async: 100
+      poll: 0
+
+    - name: Wait for repos to enable
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ enabled_repos.results }}"
+      register: enabled_repos_results
+      until: enabled_repos_results.finished
+      retries: 50
+      delay: 5
+
+    - name: Add epel repo
+      ansible.builtin.yum_repository:
+        name: epel
+        metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-8&arch=x86_64&infra=$infra&content=$contentdir"
+        baseurl: "https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64"
+        gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-8"
+        description: EPEL YUM repo
+        state: present
+        gpgcheck: true
+      register: epel_repo
+      async: 100
+      poll: 0
+
+    - name: Add epel-modular repo
+      ansible.builtin.yum_repository:
+        name: epel-modular
+        metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-modular-8&arch=x86_64&infra=$infra&content=$contentdir"
+        baseurl: "https://dl.fedoraproject.org/pub/epel/8/Modular/x86_64"
+        gpgkey: "file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-8"
+        description: EPEL-Modular YUM repo
+        state: present
+        gpgcheck: true
+      register: epel_modular_repo
+      async: 100
+      poll: 0
+
+    - name: Add rke repo
+      ansible.builtin.yum_repository:
+        name: rancher-rke2-1-24-latest
+        file: rancher-rke2
+        baseurl: "https://rpm.rancher.io/rke2/latest/1.24/centos/8/x86_64"
+        gpgkey: "https://rpm.rancher.io/public.key"
+        description: RKE YUM repo
+        state: present
+        gpgcheck: true
+      register: rke_repo
+      async: 100
+      poll: 0
+
+    - name: Add rke-common repo
+      ansible.builtin.yum_repository:
+        name: rancher-rke2-common-latest
+        file: rancher-rke2
+        baseurl: "https://rpm.rancher.io/rke2/latest/common/centos/8/noarch"
+        gpgkey: "https://rpm.rancher.io/public.key"
+        description: RKE-common YUM repo
+        state: present
+        gpgcheck: true
+      register: rke_common_repo
+      async: 100
+      poll: 0
+
+    - name: Add hashicorp repo
+      ansible.builtin.yum_repository:
+        name: hashicorp
+        baseurl: "https://rpm.releases.hashicorp.com/RHEL/$releasever/$basearch/stable"
+        gpgkey: "https://rpm.releases.hashicorp.com/gpg"
+        description: hashicorp YUM repo
+        state: present
+        gpgcheck: true
+      register: hashicorp_repo
+      async: 100
+      poll: 0
+
+    - name: Add kubernetes repo
+      ansible.builtin.yum_repository:
+        name: kubernetes
+        baseurl: "https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64"
+        gpgkey: "https://packages.cloud.google.com/yum/doc/yum-key.gpg\nhttps://packages.cloud.google.com/yum/doc/rpm-package-key.gpg"
+        description: kubernetes repo
+        state: present
+        repo_gpgcheck: false
+        gpgcheck: true
+      register: kubernetes_repo
+      async: 100
+      poll: 0
+
+    - name: Install epel
+      ansible.builtin.dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+        state: present
+      register: epel_install
+      async: 100
+      poll: 0
+
+    - name: Check third party repos added
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop:
+        - "{{ epel_install }}"
+        - "{{ epel_repo }}"
+        - "{{ epel_modular_repo }}"
+        - "{{ hashicorp_repo }}"
+        - "{{ rke_repo }}"
+        - "{{ rke_common_repo }}"
+        - "{{ kubernetes_repo }}"
+      loop_control:
+        loop_var: "item"
+      register: third_party_repos_results
+      until: third_party_repos_results.finished
+      retries: 50
+      delay: 20
+
+- name: Update and install packages from internet
+  when: internet
+  block:
+    - name: DNF update
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_only: true
+        nobest: true
+        skip_broken: true
+
+    - name: Install all packages
+      ansible.builtin.dnf:
+        name:
+          - python3
+          - vim
+          - kubectl
+          - terraform
+          - terraform-ls
+          - httpd-tools
+          - dnf-plugins-core
+          - wget
+          - createrepo
+          - yum-utils
+          - python3-firewall
+          - iputils
+          - unzip
+          - python3-passlib
+          - nginx
+          - python3-pip
+          - python3-devel
+          - debmirror
+          - "@container-tools"
+          - "@go-toolset"
+        state: present
+        nobest: true
+        skip_broken: true
+      register: pkgs_installed
+      async: 600
+      poll: 0
+
+- name: Use pip to install ansible and deps
+  become_user: {{ ansible_user }}
+  ansible.builtin.pip:
+    name: "{{ item }}"
+    state: latest
+    chdir: /home/{{ ansible_user }}
+    extra_args: --user --upgrade
+  loop:
+    - pip
+    - setuptools-rust
+    - ansible
+    - ansible-lint
+  when: internet
+
+- name: Get firewalld service status
+  ansible.builtin.systemd:
+    name: firewalld
+  register: firewalld_service_status
+
+- name: Open firewall port for http/https/ssh
+  ansible.posix.firewalld:
+    service: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  with_items:
+    - http
+    - https
+    - ssh
+    - dns
+  when: firewalld_service_status.status.ActiveState == "active"
+
+- name: Add /data lv
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "pvcreate /dev/sdb"
+    - "vgextend rhel /dev/sdb"
+    - "lvcreate -n data -l +100%FREE rhel"
+    - "mkfs.xfs /dev/rhel/data"
+
+- name: Create directories
+  ansible.builtin.file:
+    path: "/data"
+    state: directory
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+
+- name: Mount /data
+  ansible.builtin.mount:
+    path: /data
+    src: /dev/rhel/data
+    fstype: xfs
+    state: mounted
+    opts: defaults,noexec,nosuid,nodev
+
+- name: Add /data to fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "/dev/mapper/rhel-data /data xfs defaults,noexec,nosuid,nodev 0 0"
+    state: present
+    insertafter: "^\/dev\/mapper\/rhel-var_tmp.*$"
+
+- name: Extend /var volume
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "pvcreate /dev/sdc"
+    - "vgextend rhel /dev/sdc"
+    - "lvextend -l +100%FREE /dev/rhel/var"
+    - "xfs_growfs /dev/rhel/var"
+
+- name: Create directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: 0755
+    owner: {{ ansible_user }}
+    group: {{ ansible_user }}
+  loop:
+    - "/data/mirrors/rhel/keys"
+    - "/data/mirrors/rhel/certs"
+    - "/data/images"
+    - "/data/clamav"
+    - "/etc/containers/certs.d/registry.big-bang.{{ domain }}"
+    - "/etc/containers/certs.d/repo.big-bang.{{ domain }}"
+
+- name: Copy gpg keys to be served by nginx
+  ansible.builtin.copy:
+    src: "/etc/pki/rpm-gpg/{{ item }}"
+    dest: /data/mirrors/rhel/keys/{{ item }}
+    owner: root
+    group: root
+    mode: 0644
+    remote_src: true
+  loop:
+    - hashicorp.gpg
+    - kubernetes-rpm-package-key.gpg
+    - rancher-public.key
+    - RPM-GPG-KEY-redhat-beta
+    - kubernetes-yum-key.gpg
+    - RPM-GPG-KEY-EPEL-8
+    - RPM-GPG-KEY-redhat-release
+
+- name: Set context for selinux
+  ansible.builtin.command: "restorecon -Rv /data"
+
+- name: Check pkgs installed
+  ansible.builtin.async_status:
+    jid: "{{ pkgs_installed.ansible_job_id }}"
+  register: pkg_install_results
+  until: pkg_install_results.finished
+  retries: 100
+  delay: 5
+  when: internet
+
+- name: Clean dnf
+  ansible.builtin.command: "{{ item }}"
+  with_items:
+    - dnf autoremove -y
+    - dnf clean all

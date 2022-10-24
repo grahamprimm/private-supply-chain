@@ -1,0 +1,24 @@
+---
+- name: Set com
+  ansible.builtin.set_fact:
+    domain: 'com'
+    dns_server: 'X.X.X.X'
+    internet: true
+    cacheable: true
+  when: BIG_BANG_DOMAIN_SUFFIX != '.com'
+
+- name: Set org
+  ansible.builtin.set_fact:
+    domain: "{{ BIG_BANG_DOMAIN_SUFFIX }}"
+    dns_server: "{{ BIG_BANG_IP }}"
+    internet: false
+    cacheable: true
+  when: BIG_BANG_DOMAIN_SUFFIX == '.org'
+
+- name: Set net
+  ansible.builtin.set_fact:
+    domain: "{{ BIG_BANG_DOMAIN_SUFFIX }}"
+    dns_server: "{{ BIG_BANG_IP }}"
+    internet: false
+    cacheable: true
+  when: BIG_BANG_DOMAIN_SUFFIX == '.net'
